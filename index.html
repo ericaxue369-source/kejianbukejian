@@ -46925,6 +46925,10 @@ function ChatScreen({
   onSkipToHome
 }) {
   const INTERVIEW_KEY = `interview_${user.id}_${initialInterview?.id}`;
+  const privacyConversationKey = String(threadContext?.threadKey || user.id || user.seed || user.name || "default");
+  const privacyStorageKey = `owo_private_chat_${privacyConversationKey}`;
+  const privacyGuardianPositionKey = `owo_private_guardian_position_${privacyConversationKey}`;
+  const privacySchemeStorageKey = "owo_private_chat_entry_scheme";
   const isConsultationSession = withCountdown && !initialInterview;
   const isOnboardingChat = !!threadContext?.onboarding;
   const [msgs, setMsgs] = useState(() => {
@@ -46954,18 +46958,33 @@ function ChatScreen({
     return base;
   });
   const [mode, setMode] = useState("ai");
-  const [humanVisible, setHumanVisible] = useState(true);
-  const [privacyIntroSeen, setPrivacyIntroSeen] = useState(false);
-  const [showPrivacyIntro, setShowPrivacyIntro] = useState(false);
-  const [privacyToast, setPrivacyToast] = useState("");
-  const [composerFocused, setComposerFocused] = useState(false);
-  const [privacyUiVariant, setPrivacyUiVariant] = useState(() => {
+  const [humanVisible, setHumanVisible] = useState(() => {
     try {
-      return localStorage.getItem("owo_privacy_ui_variant") === "B" ? "B" : "A";
+      return localStorage.getItem(privacyStorageKey) !== "private";
     } catch (e) {
-      return "A";
+      return true;
     }
   });
+  const [privacyToast, setPrivacyToast] = useState("");
+  const [privateChatOpen, setPrivateChatOpen] = useState(false);
+  const [privateChatMenuOpen, setPrivateChatMenuOpen] = useState(false);
+  const [privateClearConfirmOpen, setPrivateClearConfirmOpen] = useState(false);
+  const [privacyEntryScheme, setPrivacyEntryScheme] = useState(() => {
+    try { return localStorage.getItem(privacySchemeStorageKey) === "B" ? "B" : "A"; } catch (e) { return "A"; }
+  });
+  const [privacyGuardianAction, setPrivacyGuardianAction] = useState("");
+  const [privacyGuardianPosition, setPrivacyGuardianPosition] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(privacyGuardianPositionKey) || "null");
+      return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y) ? saved : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  const [privacyGuardianBlink, setPrivacyGuardianBlink] = useState(false);
+  const [privacyGuardianHint, setPrivacyGuardianHint] = useState(false);
+  const [privacyMotionActive, setPrivacyMotionActive] = useState(() => typeof document === "undefined" || !document.hidden);
+  const [composerFocused, setComposerFocused] = useState(false);
   const [inputVal, setInputVal] = useState("");
   const [expired, setExpired] = useState(false);
   const [consultActive, setConsultActive] = useState(isConsultationSession);
@@ -47003,6 +47022,8 @@ function ChatScreen({
     clearTimeout(pressTimerRef.current);
   };
   const bottomRef = useRef(null);
+  const chatRootRef = useRef(null);
+  const privacyGuardianDragRef = useRef({ active: false, moved: false, startX: 0, startY: 0, originX: 0, originY: 0 });
   const inputRef = useRef(null);
   const timerRef = useRef(null);
   const startTimestampRef = useRef(null);
@@ -47055,10 +47076,54 @@ function ChatScreen({
     return () => clearInterval(t);
   }, [consultActive]);
   useEffect(() => {
-    const updatePrivacyVariant = event => setPrivacyUiVariant(event.detail?.variant === "B" ? "B" : "A");
-    window.addEventListener("owo-privacy-ui-change", updatePrivacyVariant);
-    return () => window.removeEventListener("owo-privacy-ui-change", updatePrivacyVariant);
+    try {
+    const savedPrivate = localStorage.getItem(privacyStorageKey) === "private";
+    setHumanVisible(!savedPrivate);
+    setPrivateChatOpen(savedPrivate);
+    if (savedPrivate) setMode("ai");
+    try {
+      const savedPosition = JSON.parse(localStorage.getItem(privacyGuardianPositionKey) || "null");
+      setPrivacyGuardianPosition(savedPosition && Number.isFinite(savedPosition.x) && Number.isFinite(savedPosition.y) ? savedPosition : null);
+    } catch (positionError) {
+      setPrivacyGuardianPosition(null);
+    }
+    } catch (e) {
+      setHumanVisible(true);
+      setPrivateChatOpen(false);
+    }
+  }, [privacyStorageKey]);
+  useEffect(() => {
+    const updateMotionState = () => setPrivacyMotionActive(!document.hidden);
+    document.addEventListener("visibilitychange", updateMotionState);
+    return () => document.removeEventListener("visibilitychange", updateMotionState);
   }, []);
+  useEffect(() => {
+    if (!privacyMotionActive) {
+      setPrivacyGuardianBlink(false);
+      return;
+    }
+    let blinkTimer = null;
+    let reopenTimer = null;
+    let cancelled = false;
+    const scheduleBlink = () => {
+      const delay = 4000 + Math.round(Math.random() * 3000);
+      blinkTimer = setTimeout(() => {
+        if (cancelled) return;
+        setPrivacyGuardianBlink(true);
+        reopenTimer = setTimeout(() => {
+          if (cancelled) return;
+          setPrivacyGuardianBlink(false);
+          scheduleBlink();
+        }, 150);
+      }, delay);
+    };
+    scheduleBlink();
+    return () => {
+      cancelled = true;
+      clearTimeout(blinkTimer);
+      clearTimeout(reopenTimer);
+    };
+  }, [privacyMotionActive]);
   const interviewBootRef = useRef(false);
   useEffect(() => {
     if (initialInterview && !isResumingInterview && !interviewBootRef.current) {
@@ -47259,41 +47324,129 @@ function ChatScreen({
     setTimeout(() => setPrivacyToast(""), 1800);
   };
   const applyHumanVisibility = visible => {
+    try {
+      localStorage.setItem(privacyStorageKey, visible ? "normal" : "private");
+    } catch (e) {
+      showPrivacyStatus("切换失败，请重试");
+      return false;
+    }
     setHumanVisible(visible);
     if (!visible) {
       setMode("ai");
       if (inputVal.startsWith(AT_PREFIX)) setInputVal(inputVal.slice(AT_PREFIX.length));
     }
-    setMsgs(prev => [...prev, {
-      id: `visibility_${Date.now()}`,
-      sentAt: Date.now(),
-      side: "system",
-      __visibilityDivider: true,
-      humanVisible: visible,
-      text: visible ? `以下新内容对${user.name}真人可见` : "以下内容仅用于当前对话，对方真人不可见"
-    }]);
-    showPrivacyStatus(visible ? "已恢复对方真人可见" : "已进入私密对话");
+    return true;
   };
-  const toggleHumanVisibility = () => {
+  const enterPrivateChat = () => {
     if (!privacyControlEnabled) return;
-    if (humanVisible && !privacyIntroSeen) {
-      setShowPrivacyIntro(true);
-      return;
-    }
-    applyHumanVisibility(!humanVisible);
+    setPrivacyGuardianAction("enter");
+    if (privacyEntryScheme === "A") showPrivacyStatus("OUO 陪你进入私密空间 ✦");
+    setTimeout(() => {
+      applyHumanVisibility(false);
+      setPrivateChatOpen(true);
+    }, 140);
+    setTimeout(() => {
+      setPrivacyGuardianAction("");
+      setMsgs(prev => [...prev, {
+        id: `private_greeting_${Date.now()}`,
+        sentAt: Date.now(),
+        side: "them",
+        who: "ai",
+        humanVisible: false,
+        __privateGreeting: true,
+        text: privacyEntryScheme === "B" ? `嗨，我是${user.name}的分身。现在只有我们在隐身空间里，想聊什么都可以告诉我。` : `嗨，我是${user.name}的分身。这里是我们的私密空间，想聊什么都可以告诉我。`
+      }]);
+    }, 560);
   };
-  const selectHumanVisibility = visible => {
-    if (visible === humanVisible || !privacyControlEnabled) return;
-    if (!visible && !privacyIntroSeen) {
-      setShowPrivacyIntro(true);
+  const leavePrivateChat = () => {
+    setPrivateChatMenuOpen(false);
+    setPrivateClearConfirmOpen(false);
+    setPrivacyGuardianAction("leave");
+    if (privacyEntryScheme === "A") showPrivacyStatus("正在返回普通聊天");
+    setTimeout(() => {
+      setPrivateChatOpen(false);
+      applyHumanVisibility(true);
+      setPrivacyGuardianAction("");
+    }, 520);
+  };
+  const clearPrivateChatHistory = () => {
+    setMsgs(prev => prev.filter(message => message.humanVisible !== false));
+    setPrivateClearConfirmOpen(false);
+    setPrivateChatMenuOpen(false);
+    showPrivacyStatus("隐身聊天记录已清空");
+  };
+  const selectPrivacyEntryScheme = scheme => {
+    setPrivacyEntryScheme(scheme);
+    setPrivacyGuardianPosition(null);
+    try {
+      localStorage.setItem(privacySchemeStorageKey, scheme);
+      localStorage.removeItem(privacyGuardianPositionKey);
+    } catch (e) {}
+  };
+  const handlePrivacyGuardianPointerDown = event => {
+    if (!privacyControlEnabled) return;
+    setPrivacyGuardianHint(true);
+    setTimeout(() => setPrivacyGuardianHint(false), 1200);
+    const pointer = event.touches ? event.touches[0] : event;
+    if (event.currentTarget?.setPointerCapture && event.pointerId != null) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    const origin = privacyGuardianPosition || { x: 0, y: 0 };
+    privacyGuardianDragRef.current = {
+      active: true,
+      moved: false,
+      startX: pointer.clientX,
+      startY: pointer.clientY,
+      originX: origin.x,
+      originY: origin.y,
+      currentX: origin.x,
+      currentY: origin.y
+    };
+  };
+  const handlePrivacyGuardianPointerMove = event => {
+    const drag = privacyGuardianDragRef.current;
+    if (!drag.active) return;
+    const pointer = event.touches ? event.touches[0] : event;
+    const deltaX = pointer.clientX - drag.startX;
+    const deltaY = pointer.clientY - drag.startY;
+    if (Math.abs(deltaX) + Math.abs(deltaY) > 5) drag.moved = true;
+    if (!drag.moved) return;
+    event.preventDefault && event.preventDefault();
+    const rootRect = chatRootRef.current?.getBoundingClientRect();
+    const minX = rootRect ? -rootRect.width * .46 : -135;
+    const maxX = rootRect ? rootRect.width * .38 : 115;
+    const minY = 0;
+    const maxY = rootRect ? Math.max(80, rootRect.height - 125) : 520;
+    const nextPosition = {
+      x: Math.max(minX, Math.min(maxX, drag.originX + deltaX)),
+      y: Math.max(minY, Math.min(maxY, drag.originY + deltaY))
+    };
+    drag.currentX = nextPosition.x;
+    drag.currentY = nextPosition.y;
+    setPrivacyGuardianPosition(nextPosition);
+  };
+  const handlePrivacyGuardianPointerUp = event => {
+    const drag = privacyGuardianDragRef.current;
+    if (!drag.active) return;
+    if (event?.currentTarget?.releasePointerCapture && event.pointerId != null) {
+      try { event.currentTarget.releasePointerCapture(event.pointerId); } catch (e) {}
+    }
+    privacyGuardianDragRef.current.active = false;
+    if (drag.moved) {
+      try {
+        localStorage.setItem(privacyGuardianPositionKey, JSON.stringify({
+          x: drag.currentX,
+          y: drag.currentY
+        }));
+      } catch (e) {}
       return;
     }
-    applyHumanVisibility(visible);
+    if (privateChatOpen) leavePrivateChat(); else enterPrivateChat();
   };
   const sendText = (raw, forcedMode = null) => {
     const text = (raw || "").trim();
     const canSwitchMode = allowModeSwitch && !isInInterview && !consultActive && !showConsultRenew;
-    const activeMode = forcedMode || (canSwitchMode ? mode : "ai");
+    const activeMode = privateChatOpen ? "ai" : forcedMode || (canSwitchMode ? mode : "ai");
     if (!text || activeMode === "real" && text === AT_PREFIX.trim() || expired || showConsultRenew) return;
     if (isInInterview) {
       sendInterviewAnswer(text);
@@ -47373,6 +47526,7 @@ function ChatScreen({
     }
     setTimeout(() => inputRef.current?.focus(), 50);
   };
+  const ghostPrivateTheme = privateChatOpen && privacyEntryScheme === "B";
   const BUBBLE = {
     me_real: {
       bg: T._theme === "dark" ? "rgba(159,151,235,.24)" : "#EAE5FF",
@@ -47410,18 +47564,18 @@ function ChatScreen({
       border: T._theme === "dark" ? "1px solid rgba(159,151,235,.28)" : "1px solid rgba(102,87,170,.09)"
     },
     private_me: {
-      bg: T._theme === "dark" ? "#21514D" : "#BDF3EB",
-      color: T._theme === "dark" ? "#F4FFFD" : "#242424",
+      bg: ghostPrivateTheme ? "linear-gradient(145deg,#6F4BC5 0%,#3A245E 58%,#21152F 100%)" : T._theme === "dark" ? "linear-gradient(135deg,#5E4AA5,#7861C8)" : "linear-gradient(135deg,#DCD2FF,#EEE9FF)",
+      color: ghostPrivateTheme ? "#FFFFFF" : T._theme === "dark" ? "#FFFFFF" : "#302747",
       br: "18px 4px 18px 18px",
-      shadow: T._theme === "dark" ? "none" : "0 1px 2px rgba(36,110,106,.06)",
-      border: T._theme === "dark" ? "1px solid rgba(137,241,226,.30)" : "1px solid #A9E5DD"
+      shadow: ghostPrivateTheme ? "0 8px 22px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.11)" : T._theme === "dark" ? "0 4px 14px rgba(0,0,0,.12)" : "0 3px 12px rgba(100,76,177,.10)",
+      border: ghostPrivateTheme ? "1px solid rgba(201,174,255,.24)" : T._theme === "dark" ? "1px solid rgba(194,180,255,.26)" : "1px solid rgba(119,91,205,.14)"
     },
     private_them: {
-      bg: T._theme === "dark" ? "#182F2F" : "#F1FBF9",
-      color: T._theme === "dark" ? "#F4FFFD" : "#242424",
+      bg: ghostPrivateTheme ? "linear-gradient(145deg,rgba(43,35,58,.98),rgba(25,20,35,.98))" : T._theme === "dark" ? "rgba(47,41,70,.92)" : "rgba(255,255,255,.88)",
+      color: ghostPrivateTheme ? "#EEE9F8" : T._theme === "dark" ? "#F7F4FF" : "#2E293B",
       br: "4px 18px 18px 18px",
-      shadow: T._theme === "dark" ? "none" : "0 1px 3px rgba(36,110,106,.05)",
-      border: T._theme === "dark" ? "1px solid rgba(137,241,226,.20)" : "1px solid #CDE8E4"
+      shadow: ghostPrivateTheme ? "0 7px 20px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035)" : T._theme === "dark" ? "none" : "0 3px 12px rgba(75,58,120,.06)",
+      border: ghostPrivateTheme ? "1px solid rgba(167,139,216,.18)" : T._theme === "dark" ? "1px solid rgba(194,180,255,.18)" : "1px solid rgba(124,105,177,.14)"
     }
   };
   const interviewDone = interviewState?.phase === "done";
@@ -47451,43 +47605,78 @@ function ChatScreen({
       };
     });
   }
+  if (privacyControlEnabled) {
+    displayMsgs = displayMsgs.filter(message => privateChatOpen ? message.humanVisible === false : message.humanVisible !== false);
+  }
   const canSwitchMode = allowModeSwitch && !isInInterview && !consultActive && !showConsultRenew;
-  const activeInputMode = canSwitchMode ? mode : "ai";
+  const showModeSwitch = canSwitchMode && !privateChatOpen;
+  const activeInputMode = privateChatOpen ? "ai" : canSwitchMode ? mode : "ai";
   const consultPct = isConsultationSession ? Math.max(0, Math.min(1, consultLeft / 90)) : 0;
   const phraseConfig = readAiPhrases();
   const publicQuickPhrases = canSwitchMode ? (phraseConfig.public.list || []).filter(Boolean).slice(0, 5) : [];
+  const PrivacyGuardian = () => React.createElement("span", {
+    className: `owo-private-guardian ${privacyGuardianAction === "enter" ? "is-entering" : ""} ${privacyGuardianAction === "leave" ? "is-leaving" : ""} ${!privacyMotionActive ? "owo-motion-paused" : ""}`,
+    "aria-hidden": true
+  }, React.createElement("span", { className: "owo-private-ring" }), React.createElement("span", { className: "owo-private-star" }, "✦"), React.createElement("img", { src: "assets/owo-private-guardian-tight.png", alt: "", draggable: false }), React.createElement("span", { className: `owo-private-blink owo-private-blink-left ${privacyGuardianBlink ? "is-blinking" : ""}` }), React.createElement("span", { className: `owo-private-blink owo-private-blink-right ${privacyGuardianBlink ? "is-blinking" : ""}` }));
+  const PrivacyGhostGuardian = () => React.createElement("span", {
+    className: `owo-private-ghost-guardian ${privateChatOpen ? "is-active" : ""} ${privacyGuardianAction === "enter" ? "is-entering" : ""} ${privacyGuardianAction === "leave" ? "is-leaving" : ""} ${!privacyMotionActive ? "owo-motion-paused" : ""}`,
+    "aria-hidden": true
+  }, React.createElement("span", { className: "owo-private-ghost-aura" }), React.createElement("span", { className: "owo-private-ghost-star" }, "✦"), React.createElement("span", { className: "owo-private-ghost-art" }, React.createElement("img", { src: "assets/owo-private-ghost-cutout.png", alt: "", draggable: false }), React.createElement("span", { className: `owo-private-ghost-blink owo-private-ghost-blink-left ${privacyGuardianBlink ? "is-blinking" : ""}` }), React.createElement("span", { className: `owo-private-ghost-blink owo-private-ghost-blink-right ${privacyGuardianBlink ? "is-blinking" : ""}` })));
+  const ActivePrivacyGuardian = privacyEntryScheme === "B" ? PrivacyGhostGuardian : PrivacyGuardian;
+  const PrivacyEntryControl = () => {
+    if (!privacyControlEnabled) return null;
+    if (privacyGuardianPosition) return null;
+    return React.createElement("button", {
+      className: `owo-private-entry ${privacyEntryScheme === "B" ? "is-ghost-entry" : ""} ${privacyGuardianHint ? "is-hinting" : ""}`,
+      onPointerDown: handlePrivacyGuardianPointerDown,
+      onPointerMove: handlePrivacyGuardianPointerMove,
+      onPointerUp: handlePrivacyGuardianPointerUp,
+      onPointerCancel: handlePrivacyGuardianPointerUp,
+      onPointerEnter: () => setPrivacyGuardianHint(true),
+      onPointerLeave: () => !privacyGuardianDragRef.current.active && setPrivacyGuardianHint(false),
+      "aria-label": privateChatOpen ? "返回普通聊天" : "进入私密聊天"
+    }, React.createElement(ActivePrivacyGuardian, null), React.createElement("span", { className: "owo-private-entry-tip" }, privateChatOpen ? "解除隐身" : "隐身聊天"));
+  };
+  const PrivacyReviewSwitch = () => privacyControlEnabled ? React.createElement("div", { className: "owo-private-review-switch", title: "评审方案切换" }, ["A", "B"].map(scheme => React.createElement("button", {
+    key: scheme,
+    className: privacyEntryScheme === scheme ? "is-active" : "",
+    onClick: () => selectPrivacyEntryScheme(scheme)
+  }, scheme, "方案"))) : null;
+  const privacyPageBg = ghostPrivateTheme ? "radial-gradient(circle at 78% 8%,rgba(106,74,205,.28),transparent 30%),linear-gradient(180deg,#100C1A 0%,#171126 46%,#0B0911 100%)" : privateChatOpen ? T._theme === "dark" ? "linear-gradient(180deg,#17152A 0%,#11111A 50%,#151323 100%)" : "linear-gradient(180deg,#F2EEFF 0%,#F9F7FF 30%,#F6F3FF 100%)" : T.bg;
   return React.createElement("div", {
+    ref: chatRootRef,
     style: {
       position: "absolute",
       inset: 0,
-      background: T.bg,
+      background: privacyPageBg,
       display: "flex",
-      flexDirection: "column"
+      flexDirection: "column",
+      transition: "background .42s ease"
     }
-  }, React.createElement(StatusBar, null), React.createElement("div", {
+  }, React.createElement("style", null, `@keyframes owoGhostFloat{0%,100%{transform:translateY(0) rotate(-1deg)}50%{transform:translateY(-3px) rotate(1deg)}}@keyframes owoGhostEnter{0%{transform:translateY(0) scale(1)}36%{transform:translateY(-11px) scale(1.12)}72%{transform:translateY(2px) scale(.97)}100%{transform:translateY(0) scale(1)}}@keyframes owoGhostLeave{0%{opacity:1;transform:scale(1)}65%{opacity:.42;transform:scale(.78)}100%{opacity:1;transform:scale(1)}}.owo-private-ghost-guardian{display:inline-block;width:35px;height:35px;position:relative;flex:0 0 35px;pointer-events:none;animation:owoGhostFloat 3.2s ease-in-out infinite;transform-origin:center bottom;overflow:visible;filter:drop-shadow(0 4px 7px rgba(45,25,88,.24))}.owo-private-ghost-art{position:absolute;inset:-2px;overflow:visible;filter:drop-shadow(0 2px 3px rgba(35,18,68,.26))}.owo-private-ghost-art img{position:absolute;width:39px;height:39px;left:50%;top:50%;object-fit:contain;transform:translate(-50%,-50%);user-select:none}.owo-private-ghost-blink{position:absolute;top:15px;width:6px;height:2px;border-radius:999px;background:#5B36C6;opacity:0;z-index:5;box-shadow:0 0 2px rgba(255,255,255,.72)}.owo-private-ghost-blink-left{left:8px}.owo-private-ghost-blink-right{right:8px}.owo-private-ghost-blink.is-blinking{opacity:1}.owo-private-ghost-aura{position:absolute;left:50%;top:50%;width:38px;height:38px;border-radius:50%;border:2px solid rgba(167,125,255,.65);box-shadow:0 0 16px rgba(118,74,230,.55);opacity:0;transform:translate(-50%,-50%) scale(.45)}.owo-private-ghost-star{position:absolute;right:-5px;top:-4px;color:#CFFF6A;font-size:13px;line-height:1;opacity:1;text-shadow:0 0 3px rgba(255,255,232,1),0 0 9px rgba(207,255,106,.98),0 0 17px rgba(109,255,121,.60);z-index:6}.owo-private-ghost-guardian.is-active .owo-private-ghost-art{box-shadow:none}.owo-private-ghost-guardian.is-entering{animation:owoGhostEnter .62s cubic-bezier(.2,.84,.24,1)}.owo-private-ghost-guardian.is-entering .owo-private-ghost-aura{animation:owoGuardianRing .62s ease-out}.owo-private-ghost-guardian.is-entering .owo-private-ghost-star{animation:owoGuardianStar .6s ease-out}.owo-private-ghost-guardian.is-leaving{animation:owoGhostLeave .52s ease-out}.owo-private-entry.is-ghost-entry .owo-private-entry-tip{background:rgba(12,8,20,.94);border:1px solid rgba(190,157,255,.24);box-shadow:0 5px 18px rgba(0,0,0,.32)}@keyframes owoGuardianFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}@keyframes owoGuardianEnter{0%{transform:translateY(0) scale(1)}35%{transform:translateY(-11px) scale(1.07)}68%{transform:translateY(2px) scale(.98)}100%{transform:translateY(0) scale(1)}}@keyframes owoGuardianRing{0%{opacity:.58;transform:translate(-50%,-50%) scale(.45)}100%{opacity:0;transform:translate(-50%,-50%) scale(1.8)}}@keyframes owoGuardianStar{0%,100%{opacity:1;transform:scale(.82) rotate(0);filter:brightness(1)}42%{opacity:1;transform:scale(1.8) rotate(32deg);filter:brightness(1.35)}}@keyframes owoGuardianLeave{0%{opacity:1;transform:translateY(0) scale(1)}34%{opacity:1;transform:translateY(-7px) scale(1.04)}78%{opacity:.45;transform:translateY(2px) scale(.82)}100%{opacity:1;transform:translateY(0) scale(1)}}@keyframes owoGlyphEnter{0%{transform:scale(1) translateY(0)}38%{transform:scale(1.12) translateY(-5px)}72%{transform:scale(.96) translateY(1px)}100%{transform:scale(1) translateY(0)}}@keyframes owoEyeGhostMorph{0%{transform:rotate(3deg) scale(1)}48%{transform:rotate(-84deg) scale(.834)}100%{transform:rotate(3deg) scale(1)}}@keyframes owoGhostCell{0%{opacity:0;transform:translate(0,0) scale(.3)}45%{opacity:.9}100%{opacity:0;transform:var(--cell-shift) scale(1)}}@keyframes owoGlyphOrbit{to{transform:rotate(360deg)}}@keyframes owoGlyphPulse{0%{opacity:.45;transform:scale(.65)}100%{opacity:0;transform:scale(1.55)}}.owo-private-guardian{display:inline-block;width:43px;height:43px;position:relative;flex:0 0 43px;pointer-events:none;animation:owoGuardianFloat 3s ease-in-out infinite;transform-origin:center bottom;overflow:visible}.owo-private-guardian img{position:absolute;width:43px;height:43px;left:0;top:0;object-fit:contain;user-select:none;transition:filter .25s ease}.owo-private-ring{position:absolute;left:50%;top:50%;width:42px;height:42px;border-radius:50%;border:2px solid rgba(159,151,235,.45);opacity:0;transform:translate(-50%,-50%) scale(.5)}.owo-private-star{position:absolute;right:-2px;top:-1px;color:#A682F3;font-size:11px;line-height:1;opacity:.25;text-shadow:0 0 7px rgba(166,130,243,.7);z-index:3}.owo-private-guardian.is-entering{animation:owoGuardianEnter .62s cubic-bezier(.2,.84,.24,1)}.owo-private-guardian.is-entering .owo-private-ring{animation:owoGuardianRing .62s ease-out}.owo-private-guardian.is-entering .owo-private-star{animation:owoGuardianStar .6s ease-out}.owo-private-guardian.is-leaving{animation:owoGuardianLeave .52s cubic-bezier(.3,.72,.3,1)}.owo-private-entry{display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;padding:0;cursor:pointer;position:relative;z-index:80;touch-action:none;user-select:none}.owo-private-entry.is-floating{position:absolute;left:50%;top:calc(var(--owo-safe-status-top) + 42px);z-index:80}.owo-private-entry-tip{position:absolute;left:50%;top:calc(100% + 5px);transform:translate(-50%,-3px);padding:4px 8px;border-radius:999px;background:rgba(38,31,57,.9);color:#fff;font-size:9.5px;font-weight:700;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .18s ease,transform .18s ease;box-shadow:0 4px 12px rgba(31,22,55,.16)}.owo-private-entry.is-hinting .owo-private-entry-tip{opacity:1;transform:translate(-50%,0)}.owo-private-blink{position:absolute;top:21px;width:6px;height:1.8px;border-radius:999px;background:#5E3EC7;opacity:0;z-index:4}.owo-private-blink-left{left:11px}.owo-private-blink-right{left:25px}.owo-private-blink.is-blinking{opacity:.9}.owo-private-lock-bubble{width:22px;height:18px;border-radius:10px 10px 10px 4px;background:rgba(159,151,235,.13);border:1px solid rgba(159,151,235,.22);display:flex;align-items:center;justify-content:center;color:#8167DD;margin-left:-4px;box-shadow:0 2px 7px rgba(102,75,190,.08)}.owo-morph-frame{position:relative;width:20px;height:20px;display:block;transform:rotate(3deg);transform-origin:center}.owo-morph-eye,.owo-morph-ghost{position:absolute;inset:0;transition:opacity .18s ease,transform .3s cubic-bezier(.2,.8,.2,1)}.owo-morph-eye{opacity:1;transform:scale(1)}.owo-morph-ghost{opacity:0;transform:scale(.72) rotate(12deg)}.owo-private-glyph.is-active .owo-morph-eye{opacity:0;transform:scale(.65) rotate(-18deg)}.owo-private-glyph.is-active .owo-morph-ghost{opacity:1;transform:scale(1) rotate(0)}.owo-private-glyph.is-entering .owo-morph-frame,.owo-private-glyph.is-leaving .owo-morph-frame{animation:owoEyeGhostMorph .52s cubic-bezier(.3,.75,.2,1)}.owo-cell{position:absolute;width:4px;height:4px;border-radius:50%;background:#BDF3EB;opacity:0;left:11px;top:11px;box-shadow:0 0 7px rgba(189,243,235,.95)}.owo-cell-1{--cell-shift:translate(-11px,-7px)}.owo-cell-2{--cell-shift:translate(12px,-8px)}.owo-cell-3{--cell-shift:translate(0,13px)}.owo-private-glyph.is-entering .owo-cell,.owo-private-glyph.is-leaving .owo-cell{animation:owoGhostCell .48s ease-out}.owo-private-glyph.is-entering .owo-cell-2,.owo-private-glyph.is-leaving .owo-cell-2{animation-delay:.035s}.owo-private-glyph.is-entering .owo-cell-3,.owo-private-glyph.is-leaving .owo-cell-3{animation-delay:.07s}.owo-private-glyph{width:27px;height:27px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;position:relative;color:#817B93;background:rgba(116,105,150,.08);border:1px solid rgba(104,92,142,.15);box-shadow:0 2px 8px rgba(56,43,96,.06);transition:color .3s,background .3s,border-color .3s,box-shadow .3s}.owo-private-glyph.is-active{color:#fff;background:linear-gradient(135deg,#9F97EB,#7A5BE7);border-color:rgba(122,91,231,.65);box-shadow:0 5px 14px rgba(122,91,231,.28)}.owo-private-glyph.is-entering,.owo-private-glyph.is-leaving{animation:owoGlyphEnter .52s cubic-bezier(.2,.85,.25,1)}.owo-private-glyph.is-entering:after{content:"";position:absolute;inset:-4px;border:2px solid rgba(159,151,235,.48);border-radius:13px;animation:owoGlyphPulse .55s ease-out}.owo-private-glyph-orbit{position:absolute;inset:-4px;border-radius:13px;border:1px dashed rgba(159,151,235,.48);opacity:.7;animation:owoGlyphOrbit 5s linear infinite}.owo-private-glyph.is-active .owo-private-glyph-orbit{border-color:rgba(255,255,255,.6)}.owo-private-glyph-dot{position:absolute;width:4px;height:4px;border-radius:50%;background:#BDF3EB;right:1px;top:1px;box-shadow:0 0 6px #BDF3EB}.owo-private-b-entry{display:inline-flex;align-items:center;gap:6px;border:0;background:transparent;padding:0;color:#777182;cursor:pointer}.owo-private-b-entry-label{font-size:10.5px;font-weight:700;white-space:nowrap}.owo-private-b-entry.is-active .owo-private-b-entry-label{color:#7559D6}.owo-private-review-switch{position:absolute;left:55px;right:auto;top:calc(var(--owo-safe-status-top) + 5px);display:flex;padding:2px;border-radius:999px;background:rgba(245,243,250,.92);border:1px solid rgba(80,66,112,.1);z-index:90}.owo-private-review-switch button{border:0;background:transparent;border-radius:999px;padding:3px 7px;color:#918B9C;font-size:9px;font-weight:800;cursor:pointer}.owo-private-review-switch button.is-active{background:#fff;color:#765DDD;box-shadow:0 2px 7px rgba(55,39,103,.12)}.owo-motion-paused{animation-play-state:paused!important}@media(prefers-reduced-motion:reduce){.owo-private-guardian,.owo-private-ghost-guardian,.owo-private-glyph,.owo-private-glyph-orbit{animation:none!important}}`), React.createElement(StatusBar, null), React.createElement("div", {
     style: {
       padding: "var(--owo-safe-status-top) 16px 10px",
       display: "flex",
       alignItems: "center",
       position: "relative",
       flexShrink: 0,
-      background: T.navBg,
+      background: ghostPrivateTheme ? "rgba(14,10,23,.92)" : privateChatOpen ? T._theme === "dark" ? "rgba(24,20,45,.9)" : "rgba(247,244,255,.90)" : T.navBg,
       backdropFilter: "blur(24px) saturate(180%)",
       WebkitBackdropFilter: "blur(24px) saturate(180%)",
-      borderBottom: `0.5px solid ${T.hairline}`,
+      borderBottom: ghostPrivateTheme ? "0.5px solid rgba(190,157,255,.10)" : `0.5px solid ${T.hairline}`,
       zIndex: 10
     }
-  }, React.createElement(BackBtn, {
-    onClick: onBack
+  }, React.createElement(PrivacyReviewSwitch, null), React.createElement(BackBtn, {
+    onClick: privateChatOpen ? leavePrivateChat : onBack
   }), React.createElement("div", {
     style: {
       position: "absolute",
       left: "50%",
       transform: "translateX(-50%)",
       display: "grid",
-      gridTemplateColumns: "36px auto",
-      gridTemplateRows: "auto auto auto",
-      columnGap: 7,
+      gridTemplateColumns: "40px auto",
+      gridTemplateRows: "42px",
+      columnGap: 8,
       rowGap: 2,
       alignItems: "center",
       justifyItems: "start"
@@ -47507,101 +47696,27 @@ function ChatScreen({
       cursor: onViewProfile ? "pointer" : "default",
       display: "flex",
       gridColumn: 1,
-      gridRow: "1 / 3",
+      gridRow: 1,
       alignSelf: "center"
     }
   }, React.createElement(CeoAvPlain, {
     seed: user.seed,
     bg: user.bg,
-    size: 36
-  })), React.createElement("span", {
-    style: {
-      fontWeight: 600,
-      fontSize: 15,
-      color: T.text1,
-      gridColumn: 2,
-      gridRow: 1,
-      justifySelf: "start"
-    }
-  }, user.name)), privacyControlEnabled && (privacyUiVariant === "A" ? React.createElement("button", {
-    onClick: toggleHumanVisibility,
-    title: humanVisible ? "当前新消息对对方真人可见" : "当前新消息仅用于本次私密对话",
-    "aria-label": humanVisible ? "对方真人可见，点击关闭真人可见" : "对方真人不可见，点击开启真人可见",
-    style: {
-      border: "none",
-      background: "transparent",
-      padding: 0,
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 5,
-      gridColumn: 2,
-      gridRow: 2,
-      justifySelf: "start",
-      cursor: "pointer",
-      color: T.text3,
-      fontSize: 10.5,
-      fontWeight: 600,
-      lineHeight: 1.2,
-      whiteSpace: "nowrap"
-    }
-  }, React.createElement("span", null, "对方真人可见"), React.createElement("span", {
-    style: {
-      width: 24,
-      height: 14,
-      borderRadius: 999,
-      background: humanVisible ? "#9F97EB" : T._theme === "dark" ? "#55555E" : "#D7D7DE",
-      position: "relative",
-      display: "inline-block",
-      boxShadow: "inset 0 0 0 1px rgba(0,0,0,.05)"
-    }
-  }, React.createElement("span", {
-    style: {
-      position: "absolute",
-      top: 2,
-      left: humanVisible ? 12 : 2,
-      width: 10,
-      height: 10,
-      borderRadius: "50%",
-      background: "#FFFFFF",
-      boxShadow: "0 1px 2px rgba(0,0,0,.18)",
-      transition: "left .18s ease"
-    }
-  }))) : React.createElement("div", {
-    role: "group",
-    "aria-label": "对话可见模式",
-    style: {
-      display: "inline-flex",
-      alignItems: "center",
-      padding: 1,
-      borderRadius: 999,
-      background: T._theme === "dark" ? "rgba(255,255,255,.06)" : "#F3F3F6",
-      border: `1px solid ${T.hairline}`,
-      gap: 1,
-      gridColumn: 2,
-      gridRow: 2,
-      justifySelf: "start"
-    }
-  }, [{ label: "真人可见", visible: true }, { label: "私密聊", visible: false }].map(option => {
-    const active = humanVisible === option.visible;
-    return React.createElement("button", {
-      key: option.label,
-      onClick: () => selectHumanVisibility(option.visible),
-      "aria-pressed": active,
-      style: {
-        height: 18,
-        padding: "0 6px",
-        border: "none",
-        borderRadius: 999,
-        background: active ? option.visible ? "#9F97EB" : "#BDF3EB" : "transparent",
-        color: active ? option.visible ? "#FFFFFF" : "#397F7D" : T.text3,
-        fontSize: 8.5,
-        fontWeight: active ? 750 : 600,
-        cursor: "pointer",
-        whiteSpace: "nowrap",
-        boxShadow: active ? "0 1px 3px rgba(24,24,28,.08)" : "none"
-      }
-    }, option.label);
-  })))), isOnboardingChat && React.createElement("button", {
+    size: 40
+  })), React.createElement("div", {
+    style: { gridColumn: 2, gridRow: 1, justifySelf: "start", alignSelf: "center", display: "flex", alignItems: "center", gap: 8, minHeight: 42 }
+  }, React.createElement("span", { style: { fontWeight: 650, fontSize: 17, color: ghostPrivateTheme ? "#F5F0FF" : T.text1, whiteSpace: "nowrap", lineHeight: 1 } }, user.name), React.createElement(PrivacyEntryControl, null)))), privateChatOpen && React.createElement("div", {
+    style: { position: "absolute", right: 14, top: "calc(var(--owo-safe-status-top) + 4px)", zIndex: 120 }
+  }, React.createElement("button", {
+    onClick: () => setPrivateChatMenuOpen(open => !open),
+    "aria-label": "隐身聊天更多操作",
+    style: { width: 34, height: 34, border: "none", borderRadius: "50%", background: privateChatMenuOpen ? ghostPrivateTheme ? "rgba(207,255,106,.10)" : "rgba(159,151,235,.14)" : "transparent", color: ghostPrivateTheme ? "#EDE7F8" : T.text2, fontSize: 22, lineHeight: 1, letterSpacing: 2, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", paddingBottom: 8 }
+  }, "…"), privateChatMenuOpen && React.createElement("div", {
+    style: { position: "absolute", right: 0, top: 39, width: 142, padding: 5, borderRadius: 13, background: ghostPrivateTheme ? "rgba(29,22,41,.98)" : T.bgCard, border: ghostPrivateTheme ? "1px solid rgba(190,157,255,.18)" : `1px solid ${T.hairline}`, boxShadow: "0 12px 34px rgba(0,0,0,.24)" }
+  }, React.createElement("button", {
+    onClick: () => { setPrivateChatMenuOpen(false); setPrivateClearConfirmOpen(true); },
+    style: { width: "100%", height: 38, border: "none", borderRadius: 9, background: "transparent", color: "#EF6A72", fontSize: 12, fontWeight: 750, cursor: "pointer", textAlign: "left", padding: "0 11px" }
+  }, "清空聊天记录"))), isOnboardingChat && React.createElement("button", {
     onClick: onSkipToHome,
     style: {
       marginLeft: "auto",
@@ -47724,9 +47839,13 @@ function ChatScreen({
       display: "flex",
       flexDirection: "column",
       gap: 14,
-      position: "relative"
+      position: "relative",
+      background: ghostPrivateTheme ? "radial-gradient(circle at 82% 5%,rgba(124,82,218,.16),transparent 27%),linear-gradient(180deg,rgba(30,23,43,.72),rgba(12,9,18,.36))" : privateChatOpen ? T._theme === "dark" ? "linear-gradient(180deg,rgba(43,35,76,.42),rgba(21,19,37,.22))" : "linear-gradient(180deg,rgba(239,234,255,.60),rgba(250,248,255,.25))" : "transparent",
+      transition: "background .42s ease"
     }
-  }, displayMsgs.map((msg, msgIndex) => {
+  }, privateChatOpen && React.createElement("div", {
+    style: { alignSelf: "center", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, margin: "0 0 4px", padding: "6px 10px", borderRadius: 999, color: ghostPrivateTheme ? "#EDE5FF" : T._theme === "dark" ? "#E9E1FF" : "#7259D3", background: ghostPrivateTheme ? "rgba(24,18,34,.78)" : T._theme === "dark" ? "rgba(36,29,59,.88)" : "rgba(255,255,255,.66)", border: ghostPrivateTheme ? "1px solid rgba(190,157,255,.18)" : T._theme === "dark" ? "1px solid rgba(186,161,255,.26)" : "1px solid rgba(117,89,211,.14)", boxShadow: ghostPrivateTheme ? "0 6px 20px rgba(0,0,0,.18)" : T._theme === "dark" ? "0 6px 20px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.05)" : "none", fontSize: 10.5, fontWeight: 700 }
+  }, React.createElement(ActivePrivacyGuardian, null), `正与${user.name} 的分身私聊，对方真人看不到哦～`), displayMsgs.map((msg, msgIndex) => {
     if (msg.__visibilityDivider) {
       const privateMode = msg.humanVisible === false;
       return React.createElement("div", {
@@ -47954,8 +48073,7 @@ function ChatScreen({
     const isInterviewQ = msg.isQ;
     const isInterviewA = msg.type === "interviewAnswer";
     const alignRight = isMyMsg;
-    const isPrivateMsg = msg.humanVisible === false;
-    const styleKey = isPrivateMsg ? isMyMsg ? "private_me" : "private_them" : isInterviewQ ? "interview_q" : isInterviewA ? "interview_a" : isMyMsg ? "me_real" : isTheirAI ? "them_ai" : "them_real";
+    const styleKey = privateChatOpen ? isMyMsg ? "private_me" : "private_them" : isInterviewQ ? "interview_q" : isInterviewA ? "interview_a" : isMyMsg ? "me_real" : isTheirAI ? "them_ai" : "them_real";
     const bs = BUBBLE[styleKey] || BUBBLE.them_ai;
     const AvatarEl = () => {
       if (isMyMsg) return React.createElement("button", {
@@ -48130,9 +48248,10 @@ function ChatScreen({
       flexShrink: 0,
       position: "relative",
       zIndex: 80,
-      background: "transparent"
+      background: ghostPrivateTheme ? "rgba(11,8,17,.94)" : privateChatOpen ? T._theme === "dark" ? "rgba(21,19,37,.94)" : "rgba(248,246,255,.94)" : "transparent",
+      transition: "background .42s ease"
     }
-  }, canSwitchMode && React.createElement("div", {
+  }, showModeSwitch && React.createElement("div", {
     style: {
       padding: "8px 16px 2px",
       display: "flex",
@@ -48218,10 +48337,10 @@ function ChatScreen({
       flex: 1,
       minHeight: 40,
       boxSizing: "border-box",
-      background: "rgba(255,255,255,.82)",
+      background: ghostPrivateTheme ? "rgba(31,24,43,.96)" : privateChatOpen ? T._theme === "dark" ? "rgba(50,43,76,.88)" : "rgba(255,255,255,.88)" : "rgba(255,255,255,.82)",
       borderRadius: 999,
-      border: humanVisible ? "1px solid rgba(24,24,28,.09)" : `1px solid ${composerFocused ? "#72C9C1" : "#CDE8E4"}`,
-      boxShadow: humanVisible ? "0 1px 3px rgba(24,24,28,.035)" : "0 1px 3px rgba(36,110,106,.06)",
+      border: ghostPrivateTheme ? "1px solid rgba(190,157,255,.22)" : privateChatOpen ? "1px solid rgba(119,91,205,.24)" : "1px solid rgba(24,24,28,.09)",
+      boxShadow: ghostPrivateTheme ? "0 7px 24px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.035)" : privateChatOpen ? "0 4px 16px rgba(91,67,164,.10)" : "0 1px 3px rgba(24,24,28,.035)",
       padding: "4px 10px 4px 5px",
       display: "flex",
       alignItems: "center",
@@ -48253,11 +48372,11 @@ function ChatScreen({
     width: "6",
     height: "12",
     rx: "3",
-    stroke: "#777780",
+    stroke: ghostPrivateTheme ? "#BBADE0" : "#777780",
     strokeWidth: "1.7"
   }), React.createElement("path", {
     d: "M5 10a7 7 0 0014 0M12 19v3M9 22h6",
-    stroke: "#777780",
+    stroke: ghostPrivateTheme ? "#BBADE0" : "#777780",
     strokeWidth: "1.7",
     strokeLinecap: "round"
   }))), activeInputMode === "real" && !isInInterview && React.createElement("span", {
@@ -48280,14 +48399,14 @@ function ChatScreen({
     onKeyDown: e => {
       if (e.key === "Enter") send();
     },
-    placeholder: showConsultRenew ? "请选择是否继续咨询" : isInInterview ? "输入你的回答，按回车发送…" : consultActive ? "输入咨询内容…" : activeInputMode === "real" ? "发送给真人…" : humanVisible ? "发消息…" : "私密发送…",
+    placeholder: showConsultRenew ? "请选择是否继续咨询" : isInInterview ? "输入你的回答，按回车发送…" : consultActive ? "输入咨询内容…" : privateChatOpen ? `和${user.name}的分身私密聊…` : activeInputMode === "real" ? "发送给真人…" : "发消息…",
     style: {
       flex: 1,
       background: "none",
       border: "none",
       outline: "none",
       fontSize: 14,
-      color: T.text1,
+      color: ghostPrivateTheme ? "#F6F1FF" : T.text1,
       minWidth: 0
     }
   })), React.createElement("button", {
@@ -48296,14 +48415,14 @@ function ChatScreen({
       width: 36,
       height: 36,
       borderRadius: "50%",
-      background: T.grad,
-      border: "none",
+      background: ghostPrivateTheme ? "linear-gradient(145deg,#62409E,#2A183B)" : T.grad,
+      border: ghostPrivateTheme ? "1px solid rgba(207,179,255,.30)" : "none",
       cursor: "pointer",
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
       flexShrink: 0,
-      boxShadow: "0 2px 7px rgba(138,43,226,.22)"
+      boxShadow: ghostPrivateTheme ? "0 5px 16px rgba(0,0,0,.30),0 0 12px rgba(118,74,230,.22)" : "0 2px 7px rgba(138,43,226,.22)"
     }
   }, React.createElement("svg", {
     width: "16",
@@ -48320,11 +48439,23 @@ function ChatScreen({
     style: {
       padding: "0 16px calc(12px + env(safe-area-inset-bottom, 0px))",
       fontSize: 10.5,
-      color: T.text3,
+      color: ghostPrivateTheme ? "#988CAC" : T.text3,
       lineHeight: 1.4,
       textAlign: "center"
     }
-  }, humanVisible ? "内容由AI生成，请谨慎核实" : "私密内容仅用于当前对话，默认不进入对方长期记忆")), privacyToast && React.createElement("div", {
+  }, privateChatOpen ? "私密内容仅用于当前对话，仅与分身交流" : "内容由AI生成，请谨慎核实")), privacyControlEnabled && privacyGuardianPosition && React.createElement("button", {
+    className: `owo-private-entry is-floating ${privacyEntryScheme === "B" ? "is-ghost-entry" : ""} ${privacyGuardianHint ? "is-hinting" : ""}`,
+    style: {
+      transform: `translate(${privacyGuardianPosition.x}px, ${privacyGuardianPosition.y}px)`
+    },
+    onPointerDown: handlePrivacyGuardianPointerDown,
+    onPointerMove: handlePrivacyGuardianPointerMove,
+    onPointerUp: handlePrivacyGuardianPointerUp,
+    onPointerCancel: handlePrivacyGuardianPointerUp,
+    onPointerEnter: () => setPrivacyGuardianHint(true),
+    onPointerLeave: () => !privacyGuardianDragRef.current.active && setPrivacyGuardianHint(false),
+    "aria-label": privateChatOpen ? "返回普通聊天" : "进入私密聊天"
+  }, React.createElement(ActivePrivacyGuardian, null), React.createElement("span", { className: "owo-private-entry-tip" }, privateChatOpen ? "解除隐身" : "隐身聊天")), privacyToast && React.createElement("div", {
     style: {
       position: "absolute",
       top: "calc(var(--owo-safe-status-top) + 72px)",
@@ -48340,33 +48471,19 @@ function ChatScreen({
       whiteSpace: "nowrap",
       boxShadow: "0 5px 18px rgba(0,0,0,.16)"
     }
-  }, privacyToast), showPrivacyIntro && React.createElement("div", {
-    style: {
-      position: "absolute",
-      inset: 0,
-      zIndex: 250,
-      background: "rgba(20,24,26,.36)",
-      backdropFilter: "blur(7px)",
-      WebkitBackdropFilter: "blur(7px)",
-      display: "flex",
-      alignItems: "flex-end"
-    }
+  }, privacyToast), privateClearConfirmOpen && React.createElement("div", {
+    onClick: () => setPrivateClearConfirmOpen(false),
+    style: { position: "absolute", inset: 0, zIndex: 360, background: "rgba(7,5,11,.52)", backdropFilter: "blur(7px)", WebkitBackdropFilter: "blur(7px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }
   }, React.createElement("div", {
-    style: {
-      width: "100%",
-      boxSizing: "border-box",
-      background: T.bgCard,
-      borderRadius: "26px 26px 0 0",
-      padding: "18px 20px calc(24px + env(safe-area-inset-bottom, 0px))",
-      boxShadow: "0 -12px 38px rgba(20,20,30,.16)"
-    }
-  }, React.createElement("div", { style: { width: 40, height: 4, borderRadius: 999, background: T.hairline, margin: "0 auto 17px" } }), React.createElement("div", { style: { fontSize: 17, fontWeight: 850, color: T.text1, marginBottom: 10 } }, "开启私密对话"), React.createElement("div", { style: { fontSize: 13, lineHeight: 1.75, color: T.text2, marginBottom: 18 } }, `关闭真人可见后，新发送的内容对${user.name}真人不可见，仅用于分身保持本次对话连贯，默认不会进入对方分身的长期记忆。涉及安全、举报或法律要求时，平台可能依法处理相关内容。`), React.createElement("button", {
-    onClick: () => { setPrivacyIntroSeen(true); setShowPrivacyIntro(false); applyHumanVisibility(false); },
-    style: { width: "100%", height: 44, border: "none", borderRadius: 13, background: T.grad, color: "#FFFFFF", fontSize: 14, fontWeight: 800, cursor: "pointer", boxShadow: "0 8px 20px rgba(126,87,194,.20)" }
-  }, "开启私密对话"), React.createElement("button", {
-    onClick: () => setShowPrivacyIntro(false),
-    style: { width: "100%", height: 42, border: `1px solid ${T.purple}`, borderRadius: 13, background: "transparent", color: T.purple, fontSize: 13, fontWeight: 700, cursor: "pointer", marginTop: 9 }
-  }, "暂不切换"))), showConsultRenew && React.createElement("div", {
+    onClick: event => event.stopPropagation(),
+    style: { width: "100%", maxWidth: 292, padding: "20px 18px 16px", borderRadius: 20, background: ghostPrivateTheme ? "linear-gradient(155deg,#241A33,#120E1A)" : T.bgCard, border: ghostPrivateTheme ? "1px solid rgba(207,255,106,.16)" : `1px solid ${T.hairline}`, boxShadow: "0 24px 60px rgba(0,0,0,.34)" }
+  }, React.createElement("div", { style: { color: ghostPrivateTheme ? "#F4EEFF" : T.text1, fontSize: 17, fontWeight: 900, textAlign: "center" } }, "清空隐身聊天记录？"), React.createElement("div", { style: { marginTop: 9, color: ghostPrivateTheme ? "#A99DBB" : T.text3, fontSize: 11.5, lineHeight: 1.6, textAlign: "center" } }, "仅清空当前对象的隐身聊天内容，普通聊天记录不会受到影响。清空后无法恢复。"), React.createElement("div", { style: { display: "flex", gap: 9, marginTop: 18 } }, React.createElement("button", {
+    onClick: () => setPrivateClearConfirmOpen(false),
+    style: { flex: 1, height: 40, borderRadius: 12, border: ghostPrivateTheme ? "1px solid rgba(190,157,255,.22)" : `1px solid ${T.hairline}`, background: ghostPrivateTheme ? "rgba(255,255,255,.045)" : T.bgSoft, color: ghostPrivateTheme ? "#D6CCE5" : T.text2, fontSize: 12, fontWeight: 750, cursor: "pointer" }
+  }, "取消"), React.createElement("button", {
+    onClick: clearPrivateChatHistory,
+    style: { flex: 1, height: 40, borderRadius: 12, border: "none", background: T.grad, color: "#FFFFFF", fontSize: 12, fontWeight: 850, cursor: "pointer", boxShadow: "0 6px 16px rgba(122,91,231,.28)" }
+  }, "确认清空")))), showConsultRenew && React.createElement("div", {
     style: {
       position: "absolute",
       inset: 0,
@@ -74726,42 +74843,6 @@ function mountOwoApp() {
       syncLanguageButtons(language);
       renderCurrent();
     });
-    const privacyDivider = document.createElement("span");
-    privacyDivider.style.cssText = "width:1px;height:20px;background:var(--owo-color-border);margin:8px 4px;flex:0 0 auto";
-    bar.appendChild(privacyDivider);
-    const privacyLabel = document.createElement("span");
-    privacyLabel.textContent = "隐私UI";
-    privacyLabel.style.cssText = "display:inline-flex;align-items:center;padding:0 5px;color:var(--owo-color-text-tertiary);flex:0 0 auto";
-    bar.appendChild(privacyLabel);
-    const privacyButtons = [];
-    let activePrivacyVariant = "A";
-    try {
-      activePrivacyVariant = localStorage.getItem("owo_privacy_ui_variant") === "B" ? "B" : "A";
-    } catch (e) {}
-    const syncPrivacyButtons = variant => privacyButtons.forEach(item => {
-      const active = item.dataset.variant === variant;
-      item.style.background = active ? "rgba(159,151,235,.16)" : "transparent";
-      item.style.color = active ? "var(--owo-color-brand)" : "var(--owo-color-text-secondary)";
-      item.setAttribute("aria-pressed", active ? "true" : "false");
-    });
-    [["A 开关", "A"], ["B 双选", "B"]].forEach(([label, variant]) => {
-      const btn = document.createElement("button");
-      btn.textContent = label;
-      btn.dataset.variant = variant;
-      btn.title = variant === "A" ? "固定标签＋标准开关（推荐）" : "真人可见／私密聊双模式选择";
-      btn.style.cssText = "border:none;cursor:pointer;border-radius:999px;padding:0 11px;min-height:36px;font:inherit;color:var(--owo-color-text-secondary);background:transparent;transition:all .2s;flex:0 0 auto";
-      btn.onclick = () => {
-        activePrivacyVariant = variant;
-        try {
-          localStorage.setItem("owo_privacy_ui_variant", variant);
-        } catch (e) {}
-        syncPrivacyButtons(variant);
-        window.dispatchEvent(new CustomEvent("owo-privacy-ui-change", { detail: { variant } }));
-      };
-      privacyButtons.push(btn);
-      bar.appendChild(btn);
-    });
-    syncPrivacyButtons(activePrivacyVariant);
     document.body.appendChild(bar);
   }
 }
@@ -74811,212 +74892,8 @@ function mountOwoDevRequirementNotes() {
   panel.innerHTML = `
         <div class="owo-devreq-head">
           <div>
-            <div class="owo-devreq-title">我要找人 · 技术需求文档</div>
-            <div class="owo-devreq-sub">研发交付版 · 更新于 2026-09-23 · 字段、交互、状态、报告与异常规则以本说明为准</div>
-          </div>
-          <button class="owo-devreq-close" type="button" aria-label="关闭">×</button>
-        </div>
-        <div class="owo-devreq-body">
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">范围与入口</span>
-            </div>
-            <h3>产品边界</h3>
-            <ul>
-              <li>入口路径：所有用户 → 我的 → 外表 → 我要找人 / 我的报名；广场顶部右侧提供“+ 发布找人”快捷入口。</li>
-              <li>功能开放给所有用户。广场原“创业 CEO”个人名片流改为“正在找人”，直接展示进行中的需求卡片流，不展示用户名片，不限制发布者身份；进入该频道时默认隐藏二级分类，在列表顶部向下拉后展开“全部 / 找合伙人 / 遇见心动 / 找搭子 / 活动招募 / 找场地 / 社团/社群招新 / 其他”。二级分类属于列表内容流，不吸顶，向上滑时随页面一起移出；“其他”仅归并自定义需求，可与关键词搜索叠加。分类为纯文字，不使用胶囊、底色、边框或圆角；使用13px字号、20px横向间距，选中为品牌紫，未选中为灰色，以字重反馈选择。</li>
-              <li>广场“校友圈”的北京大学学生服务总队入口在名称前直接展示内嵌的彩色官方 Logo，保持方形尺寸，不增加白底、描边、阴影或额外外框；北大米米在成员列表、介绍区和名片详情中统一使用内嵌的红色吉祥物 Logo。社群详情初始只保留返回键，组织名称在全宽沉浸式头图中展示；头图背景从状态栏延展至顶部，首屏导航透明，上滑后导航栏渐显名称。头图下使用圆角内容面轻微上浮衔接列表；头图内 Logo 与名称较常规列表更大并靠上对齐，成员数展示为灰黑（深色模式白灰）的“大号加粗数字 + 位社群成员”，不展示“活跃社群”。内容顺序为官方分身、核心成员、社群成员。核心成员在姓名下展示主理人或管理员对号认证，官方分身不展示群主认证。社群 Logo 使用内嵌资源，单独上传 HTML 到 GitHub 也可独立显示。</li>
-              <li>广场在“社群”右侧增加“未来独角兽”tab（英文 Future Unicorns）：展示由公司创建的组织，复用社群列表、申请加入、组织头图、官方分身、核心成员、社群成员的同一套样式和交互，不维护第二套组织详情。组织优先展示上传 Logo；未上传时，英文名称取首字母、中文名称取首个汉字生成稳定的文字 Logo。</li>
-              <li>设置页与原型顶部“外观”右侧的“语言：中文 / English”必须调用同一个 <code>setOwoLanguage</code>。中英文 UI 词典随 HTML 静态发布，不依赖本地缓存或在线翻译；链接语言使用 <code>?lang=zh-CN</code> 与 <code>?lang=en</code>，URL 优先于本地偏好，切换后同步更新 URL，复制链接即可分享对应语言版本。英文模式必须覆盖导航、表单、按钮、提示、空状态、动态时间人数、发布/报名/匹配、聊天、知识、教育认证和设置等所有系统文案；真实用户填写内容不自动翻译，原型演示内容提供英文示例。</li>
-              <li>“关于我”和组织信息模块全部删除。发布者头像、姓名、简介和角色直接读取个人名片。</li>
-              <li>产品统一使用“报名、沟通、找人助手”，不使用“申请、面试、AI面试官”。AI只辅助整理需求、沟通和匹配建议，最终连接由真人决定。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">对话可见性与私密段落</span>
-            </div>
-            <h3>对方真人可见 / 不可见</h3>
-            <ul>
-              <li>所有普通用户聊天页在对方姓名下常驻“对方真人可见”开关，默认开启；正式需求沟通与付费咨询按既有业务规则留存并对相关真人开放，不展示该开关，避免与报告、履约和计时规则冲突。</li>
-              <li>开关按切换时刻分段生效，只影响切换后的新消息。历史不可见消息不得改为可见，历史可见消息也不得因关闭开关而隐藏。每次切换必须在消息流中插入明确分界：“以下内容仅用于当前对话，对方真人不可见”或“以下新内容对{用户名}真人可见”。</li>
-              <li>首次关闭时展示一次底部说明：标题不使用锁图标；新内容对对方真人不可见，仅用于分身保持当前会话连贯，默认不进入对方分身长期记忆；不得承诺绝对无人可见，需说明安全、举报和法律合规情形下平台可能依法处理。主操作“开启私密对话”使用品牌紫渐变，次操作“暂不切换”使用透明底与品牌紫描边，明确主次层级。</li>
-              <li>私密段落内，用户消息与 AI 分身回复均标记 <code>humanVisible=false</code>，采用品牌角色的薄荷青色家族并保留身份层级：用户气泡 <code>#BDF3EB</code>、弱边框 <code>#A9E5DD</code>；AI 气泡 <code>#F1FBF9</code>、边框 <code>#CDE8E4</code>；两侧正文统一使用深黑 <code>#242424</code>。状态文字使用 <code>#397F7D</code>、开关使用 <code>#55AAA6</code>。深色模式用户与 AI 分别使用 <code>#21514D/#182F2F</code>。</li>
-              <li>真人可见段落中，用户继续使用品牌淡紫色气泡；AI 与真人回复使用中性浅灰 <code>#F7F7F9</code> 和边框 <code>#E5E5EB</code>，不得使用与页面背景相同的纯白气泡。切换状态不追溯改变历史气泡。</li>
-              <li>顶部隐私控件不使用锁图标或说明气囊。A 方案固定显示“对方真人可见”，以紫色开启态和灰色关闭态表达权限；B 方案通过“真人可见 / 私密聊”两个稳定选项表达当前模式。两套方案均使用足够的点击热区且不改变消息区布局。消息流私密分界线使用 <code>#BDF3EB</code>，保留小锁 Emoji 且不增加额外底色。</li>
-              <li>原型评审提供两套可切换顶部方案，入口位于手机外部评审工具栏“隐私UI”：A“开关”为推荐方案，固定标签“对方真人可见”，开启使用品牌紫轨道，关闭使用中性灰轨道；B“双选”为对比方案，使用“真人可见 / 私密聊”两段选择，选中真人可见为品牌紫，选中私密聊为薄荷青。头部采用两列网格：36px 头像位于左列并跨越姓名与隐私控件两行；姓名和两套隐私控件均位于右列，因此控件左边缘始终与姓名文字左边缘精确对齐，不使用固定像素偏移。B 方案需使用更紧凑的 18px 高度和小字号，视觉优先级低于姓名。两套方案只比较顶部控件，消息分段、气泡、长期记忆和权限规则完全共用。</li>
-              <li>品牌紫负责发送等主操作，薄荷青色只负责私密状态。私密状态下发送按钮仍保持品牌紫，输入框默认使用更弱的 <code>#CDE8E4</code> 边框并将占位文案改为“私密发送…”；聚焦态提升为 <code>#72C9C1</code>，避免底部同时出现两个高亮中心，也避免让用户误解为另一种发送动作或加密按钮。</li>
-              <li>颜色只作辅助，必须同时通过文字、开关状态、锁图标和段落分界表达，满足色觉差异用户的可理解性。</li>
-              <li>“找分身 / 找真人”控制回复对象，“对方真人可见”控制记录权限，两者独立。私密状态下强制切回“找分身”，禁用“找真人”；恢复真人可见后重新开放。私密状态不得生成真人自动补充回复。</li>
-              <li>接收方账户需支持“仅接受真人可见对话 / 允许私密对话”偏好。若接收方不允许私密对话，发送方关闭时不得进入私密状态，并提示“对方暂不接受私密对话”。该偏好为服务端权限校验，不能只依赖前端禁用。</li>
-              <li>消息和段落建议保存 <code>visibilitySegmentId/humanVisible/visibilityChangedAt/visibilityChangedBy</code>；AI 上下文可在当前会话内读取私密段落，但长期记忆、跨会话召回、对方真人会话查看、真人通知摘要和训练素材默认排除 <code>humanVisible=false</code> 内容。</li>
-              <li>编辑、撤回、删除消息不得改变原始可见性；引用、转发、复制到公开内容、生成匹配报告或沉淀长期记忆前必须再次校验可见性。投诉与风控访问需要受控权限和审计记录。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">字段模型</span>
-            </div>
-            <h3>一套通用发布字段</h3>
-            <ul>
-              <li>必填：需求类型 <code>type</code>、标题 <code>title</code>、背景说明 <code>description</code>、我想找谁/什么资源 <code>target</code>。</li>
-              <li>选择“自定义需求”时，自定义类型 <code>customDemandType</code> 必填；选择框原位切换为输入框，可从右侧箭头重新选标准类型。展示类型时优先显示 <code>customDemandType</code>。</li>
-              <li>选填：希望对方具备什么 <code>matchingCriteria</code>、参与方式 <code>participationRequirements</code>、找人助手沟通时长 <code>aiDuration</code>（分钟）、时间/节奏 <code>time</code>、地点/线上线下 <code>location</code>、预算/费用/回报 <code>budget</code>、人数/名额 <code>count</code>、补充说明 <code>other</code>、报名截止 <code>deadline</code>。“遇见心动”不适用人数，切换类型时清空 <code>count</code>。</li>
-              <li>需求类型顺序：社团/社群招新、找合伙人、找搭子、活动招募、找场地、遇见心动、自定义需求。类型只影响分类、AI默认沟通模板、AI润色上下文和报告维度，不改变字段结构；历史“发布活动”数据统一映射为“活动招募”。</li>
-              <li>需求对象只关联 <code>publisherUserId</code>，不保存独立组织资料或组织快照。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">发布流程</span>
-            </div>
-            <h3>手机号校验与四步发布</h3>
-            <ul>
-              <li>任一发布入口先读取账号级手机号状态。未绑定进入绑定页；绑定成功自动进入第1步。返回不创建草稿，手机号不写入需求且不公开展示。</li>
-              <li>第1步“描述需求”：选择类型后用文字或语音自然描述。输入框右下角使用发送图标触发 AI 整理，不展示“AI整理”文字按钮；输入框下方展示紧凑的实心紫色圆形麦克风按钮，点击后打开覆盖当前手机页面的深色沉浸式语音浮层。</li>
-              <li>语音浮层主视觉为占据内容区主要宽度的三层横向紫色流动波形，不使用中心放射状声纹；波形中央叠加低透明度品牌紫能量云，录音时轻微呼吸，暂停后静止并降低亮度；页面背景由顶部深紫黑自然过渡到底部品牌紫。同时展示录音时长和实时转写，支持暂停 / 继续、取消和完成。完成后回填原输入框并允许继续编辑，不支持原生语音识别时使用模拟文案完成原型流程。</li>
-              <li>第2步“确认草稿”：五张可编辑摘要卡片为标题、背景说明、目标对象/资源、匹配标准、参与方式；点击内容直接编辑，不显示编辑图标或局部完成按钮。“找人助手沟通时长”紧接参与方式，以同规格完整卡片承载标题、说明和整行下拉控件。底部提供“上一步”和“继续”。</li>
-              <li>沟通时长默认“暂不设置”，预设项为15、30、45分钟和自定义。选择自定义后，下拉框原位切换为数字输入，右侧固定显示“分钟”并保留选择箭头；点击外部或按回车保存。仅接受5-120的整数，非法值显示错误且不得写入需求。切回预设项立即保存。</li>
-              <li>第3步“补充条件”：时间、地点、预算、人数、截止时间、补充说明全部选填，未填写也可进入预览。底部提供“上一步”和唯一主按钮“预览”。“遇见心动”不展示人数；AI只提取用户第1步明确说出的条件，不自动补默认值。</li>
-              <li>第4步“预览发布”：只展示真实公开需求详情效果，使用与线上详情相同组件和映射；空字段不展示。底部为“返回修改 / 发布并上架”。</li>
-              <li>发布成功后状态直接为进行中，返回管理页并将新需求置顶；不强制进入训练页。截止时间为空表示长期有效。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">统一映射</span>
-            </div>
-            <h3>管理、编辑、公开展示</h3>
-            <ul>
-              <li>管理卡片：标题=<code>title</code>；概述优先 <code>description</code>，为空时用 <code>target</code>；辅助标签从 <code>time/location/budget/count</code> 中按顺序展示所有有值项；类型显示自定义类型或 <code>type</code>。</li>
-              <li>管理页概述展示需求数、报名数、高匹配数及灰紫色辅助线；卡片报名人数使用绿色文字，不加胶囊、底色或边框；卡片主体进入详情，底部为“查看报名”和“训练/优化找人助手”，可显示新报名角标。</li>
-              <li>发布者需求详情：展示全部非空发布字段、状态、截止时间、找人助手状态和AI策略摘要；底部提供编辑、暂停/恢复发布，暂停和删除均需二次确认。</li>
-              <li>点击编辑复用发布第2、3步组件，显示为1/2“需求信息”、2/2“补充条件”；读取并写回同一需求对象，最终页“删除 / 保存并更新”，不得给空选填项补默认值。</li>
-              <li>广场“正在找人”和用户名片“我在找人”复用公开需求卡片：标题、需求类型、条件标签、两行概述，标题右侧显示绿色“进行中”；截止后改为灰色“报名已截止”，但仍在广场呈现。类型读取 <code>type</code>，自定义需求优先显示 <code>customDemandType</code>；类型独立成行，使用 18px Google Material Symbols Outlined 风格的线性语义图标与加粗类型名称，不增加图标底座、气囊或描边。社群招新/合伙人/搭子/活动/场地/心动/自定义依次使用多人、握手、双人、日历加号、定位、心形、四宫格图标。时间/地点/预算/人数/截止时间等已填写条件在下一行使用紫色圆角标签：预算为“费用：{value}”、人数为“{value}人名额”、截止时间为“YYYY-MM-DD截止”。<code>aiDuration</code>、<code>durationMin</code>、<code>durationSec</code> 均不得出现在公开需求卡片。广场卡片底部展示无分隔线的发布者头像、昵称和单行身份摘要；用户名片卡片仅隐藏发布者信息，其他卡片视觉保持一致。两处均不展示报名数、训练状态和操作按钮，点击整张卡片进入详情。</li>
-              <li>需求类型颜色规范：找合伙人使用紫色 <code>#7568D8</code>（浅底 <code>rgba(159,151,235,.14)</code>）；遇见心动使用玫红 <code>#C96086</code>（浅底 <code>rgba(201,96,134,.12)</code>）；找搭子使用蓝色 <code>#2486AC</code>（浅底 <code>rgba(36,134,172,.12)</code>）；活动招募使用橙色 <code>#C97632</code>（浅底 <code>rgba(201,118,50,.12)</code>）；找场地使用绿色 <code>#12916C</code>（浅底 <code>rgba(18,145,108,.12)</code>）；社团/社群招新使用靛蓝 <code>#596FCB</code>（浅底 <code>rgba(89,111,203,.12)</code>）；其他/自定义需求使用青蓝 <code>#0F8FA8</code>（浅底 <code>rgba(15,143,168,.12)</code>）。以上颜色用于类型图标与名称，并在所有需求卡片、报名卡片及管理卡片中保持一致。</li>
-              <li>公开详情直接映射五个字段：“需求说明”=<code>description</code>；“我找谁/什么资源”=<code>target</code>；“希望对方具备什么”=<code>matchingCriteria</code>；“参与方式”=<code>participationRequirements</code>；“补充说明”=<code>other</code>。</li>
-              <li>公开详情标题下展示 <code>time/location/budget/count</code> 中全部有值的标签，“遇见心动”排除 <code>count</code>；首次发布时间 <code>publishedAt</code> 展示在需求元信息之后、发布者信息卡之前，编辑不更新。</li>
-              <li>发布者区映射个人名片：头像、姓名；副标题优先 <code>role · company</code>，其次 <code>role · industry</code>、<code>company · industry</code>，最后单行截断 <code>bio</code>。点击整个发布者区进入个人名片详情。</li>
-              <li>AI沟通策略只在发布者自己的需求详情展示，不在广场公开详情或报名者端展示。</li>
-              <li>第4步预览、广场公开详情、管理详情和编辑页必须读取同一字段源；预览中确认的内容发布后逐字保持一致，不维护第二套演示文案。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p1">P1</span>
-              <span class="owo-devreq-tag owo-devreq-info">AI输入辅助</span>
-            </div>
-            <h3>语音、整理与润色</h3>
-            <ul>
-              <li>语音使用与聊天输入框一致的麦克风图标。长文本输入区左下放语音，右下放“AI 润色”，无胶囊背景，各自至少保留36px点击热区。</li>
-              <li>标题、时间、地点、预算、人数等短字段不放字段级AI润色；AI行为由用户主动触发，不自动改写。</li>
-              <li>润色结果不直接覆盖原文，明确提示“使用后将替换当前内容”，操作仅为“使用此版本 / 重新生成 / 取消”，不提供“追加”。采用后仍可继续编辑。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">训练、报名与沟通</span>
-            </div>
-            <h3>报名与一次正式需求沟通</h3>
-            <ul>
-              <li>训练不是发布前置条件。未训练需求仍可公开和报名，卡片显示“训练找人助手”；训练配置完整后显示“优化找人助手”，并允许继续补充。</li>
-              <li>未训练时采用“通用规则 + 需求类型模板 + 发布字段”；已训练时再叠加训练配置。训练对话与报名沟通使用不同提示词。</li>
-              <li>公开详情底部依次为“我要报名”和“与找人助手聊聊”。点击报名后留在详情页并提示报名成功；同一用户对同一需求仅一条有效报名。截止后“我要报名”显示“报名已截止”，点击弹出不可报名说明；“与找人助手聊聊”仍可进入，但不创建报名记录、不计入报名数或正式匹配报告。“我的报名”中已沟通需求点击“与找人助手聊聊”直接打开并续接该需求已有沟通记录，不重新展示沟通规则或创建新会话。用户可以随时取消报名；发布预览不展示这两个操作按钮。</li>
-              <li>设置时长时，每位报名者只有一次正式需求沟通机会。首次进入前弹窗明确时长和一次机会；确认后由服务端写入 <code>formalStartedAt/formalEndsAt</code> 并启动倒计时，退出页面、切到后台或换设备均不暂停。再次进入恢复同一会话和服务端剩余时间，不创建第二次机会。</li>
-              <li>限时结束后消息流完整保留，输入框不隐藏，找人助手提示“已经收到您的报名信息，本次需求沟通已完成。接下来我们可以聊聊其他问题”。之后进入普通聊天，消息继续保存在同一会话，但不再改变本次需求的匹配度和正式报告。</li>
-              <li>未设置时长时，不显示倒计时。报名者可随时进入同一需求会话，找人助手持续追问并保存消息；达到报告条件后匹配结果随新的有效信息更新，直至需求关闭、报名取消或发布者确认推进。</li>
-              <li>发布者需求管理卡片底部使用“查看报名”；报名者列表将匹配度放在姓名后方，右侧统一使用“与TA聊聊”。发布者报名列表筛选为“全部 / 高匹配 / 其他”。</li>
-              <li>我的报名提供“全部 / 已沟通 / 未沟通 / 已取消”筛选，以需求卡片展示标题、发布者、类型、时间地点和报名状态；卡片顶部统一显示“进行中”，发布者头像同行右侧显示“已报名 / 已取消”，点击“已报名”需二次确认后取消，并保留在已取消列表。卡片可进入需求详情，详情底部继续提供报名和沟通操作；报名者端只展示完整AI沟通记录，不展示匹配结果、分数或报告。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">报告引擎</span>
-            </div>
-            <h3>匹配度与报告生成规则</h3>
-            <ul>
-              <li>“实时匹配度”和“正式报告”是两个产物。AI只基于需求字段、允许使用的名片资料、正式需求沟通消息和训练配置判断；所有结论必须能回溯到证据，不得补写用户未表达的信息。</li>
-              <li>最低信息门槛：至少3条有效报名者回答，且覆盖①相关经历/能力/资源、②参与动机与目标、③时间地点参与方式等合作条件。寒暄、表情、重复内容和普通聊天不计有效回答。未达到门槛时不显示百分比，只显示“评估中”或“尚未与找人助手沟通”。</li>
-              <li>达到门槛后，按本需求动态评分量表计算0-100分；各评价维度权重合计100。存在明确必选条件且报名者确认不满足时，综合分最高59。每次只用新出现的有效证据增量更新，更新需幂等并记录版本。</li>
-              <li>限时模式：沟通中达到门槛后可向发布者展示动态匹配度；服务端到达 <code>formalEndsAt</code> 后冻结正式消息范围、匹配度和报告版本。信息仍不足则生成“沟通信息不足”摘要，不强行输出百分比，也不进入高匹配。</li>
-              <li>不限时模式：达到门槛即生成首版阶段性报告，显示“报告已生成 · 持续更新”和最近更新时间。新增有效信息后延迟5秒或累计2条有效回答触发更新；需求关闭、报名取消或发布者确认推进时冻结最后版本。</li>
-              <li>报告固定包含：综合匹配度与结论、匹配依据、待确认/风险点、建议追问、生成/更新时间；下方直接展示完整需求沟通消息流，不折叠。报名者只能查看自己的消息记录，不能查看匹配分数、结论、报告或后台评价依据。</li>
-              <li>发布者筛选：“高匹配”为已有有效报告且 <code>matchScore &gt;= 80</code>；“其他”包含低于80、评估中、未沟通和信息不足；取消报名不计入当前有效报名统计。全部列表先按高匹配分数降序，再按报名时间倒序。</li>
-              <li>报告生成或更新失败时保留上一成功版本并显示“报告更新中/更新失败，请重试”，不得清空已有结果；模型版本、量表版本、输入消息截止ID和生成时间必须随报告保存，便于审计与重算。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p1">P1</span>
-              <span class="owo-devreq-tag owo-devreq-info">状态与边界</span>
-            </div>
-            <h3>状态、通知和异常</h3>
-            <ul>
-              <li>需求状态：进行中、已暂停、待发布；新建成功直接进入进行中。发布者管理详情不展示正常“进行中”标签，仅在待发布或已暂停时显示状态提醒；待发布仅用于历史草稿、迁移或发布失败。未训练不是需求状态。</li>
-              <li>找人助手状态：待训练、已训练、优化中。报名状态：已报名、沟通中、已沟通、已取消；报告状态：未开始、评估中、持续更新、已冻结、信息不足、生成失败。页面文案由状态码映射，不能用是否存在分数反推业务状态。</li>
-              <li>概述统计为需求数、报名数、高匹配数。新报名或新周报触发“大脑”紫色提醒点，查看对应内容后清除；卡片可显示新报名角标。</li>
-              <li>底部“分身AI”未读状态使用纯紫色圆点，不加白边、光圈或胶囊背景；通讯录及其它数字未读计数统一不加白色描边。通讯录联系人行除最后一项外均展示一致分割线。</li>
-              <li>截止后停止新报名，已开始的限时沟通按原 <code>formalEndsAt</code> 完成，历史沟通和报告可查看；暂停需求不公开但已报名用户仍能查看既有记录；删除不可恢复，需二次确认。</li>
-              <li>计时、重复报名、一次正式机会、报告冻结点和高匹配分组必须由服务端控制。客户端计时仅作展示；断网重连以服务端时间为准，服务端应避免同一报名并发创建多个正式会话。</li>
-              <li>发布者公开信息从个人名片读取；权限、状态、未读、报告归属和数据过滤必须由服务端校验。</li>
-              <li>“遇见心动”不得基于敏感属性进行歧视性筛选，AI避免冒犯、诱导和越界追问。所有页面兼容浅色与暗黑模式。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p1">P1</span>
-              <span class="owo-devreq-tag owo-devreq-info">数据与接口</span>
-            </div>
-            <h3>核心对象与服务端责任</h3>
-            <ul>
-              <li>需求对象至少包含：<code>id/publisherUserId/type/customDemandType/title/description/target/matchingCriteria/participationRequirements/aiDuration/time/location/budget/count/other/deadline/publishedAt/status/listed</code>；<code>aiDuration=0/null</code> 表示不限时。</li>
-              <li>助手与统计字段至少包含：<code>hasAiInterviewer/aiStatus/aiConfig/questions/applyCount/communicatedCount/highMatchCount/createdAt/updatedAt</code>。</li>
-              <li>报名对象至少包含：<code>id/demandId/applicantUserId/status/conversationId/formalStartedAt/formalEndsAt/formalEndedAt/formalLastMessageId/effectiveAnswerCount/matchScore/matchLevel/reportStatus/reportId/reportVersion/cancelledAt/createdAt/updatedAt</code>。</li>
-              <li>报告对象至少包含：<code>id/applicationId/status/score/summary/matchPoints/riskPoints/followUpQuestions/evidenceMessageIds/modelVersion/rubricVersion/inputLastMessageId/generatedAt/updatedAt/frozenAt</code>。消息需标记 <code>formal/ordinary</code> 范围，限时结束后的普通聊天不得进入正式报告输入。</li>
-              <li>服务端负责必填校验、对象归属、发布与暂停状态、截止时间、重复报名幂等、未读计数、报告权限和公开数据过滤，前端状态不能作为权限依据。</li>
-              <li>接口返回空值时沿用“空字段不展示”规则；历史数据缺少 <code>description</code> 时，管理卡片概述可降级使用 <code>target</code>，不得虚构其它默认内容。</li>
-            </ul>
-          </section>
-
-          <section class="owo-devreq-section">
-            <div class="owo-devreq-tagrow">
-              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
-              <span class="owo-devreq-tag owo-devreq-info">验收</span>
-            </div>
-            <h3>交付检查</h3>
-            <ul>
-              <li>普通用户与原CEO角色均可从两个入口发布；未绑定手机号完成绑定后自动回第1步，已绑定不重复拦截。</li>
-              <li>七种类型共用一套字段；发布、编辑、管理卡片、发布者详情、第4步预览和公开详情映射一致，选填为空时不展示、不补默认值。</li>
-              <li>发布后需求置顶且为进行中；未训练也能公开、报名和沟通；编辑保存后管理端与公开端同步显示新内容。</li>
-              <li>沟通时长卡片、预设/自定义原位输入、失焦保存、5-120校验、限时一次机会、服务端续时、超时转普通聊天、不限时持续更新、信息不足不出分和报告权限均按上述规则验证。</li>
-              <li>广场需求卡片整卡点击、二级类型筛选、需求类型标签、发布者信息、圆角辅助标签、发布者跳转、发布时间、心动人数例外、报名分组、宽幅横向语音波形、中央紫色能量云及底部品牌紫背景均按上述规则验证。</li>
-              <li>校友圈无外框方形组织 Logo、北大米米红色吉祥物 Logo、通讯录分割线、无白边未读提醒和管理卡片绿色报名人数需同时验证浅色与暗黑模式。</li>
-              <li>完整数据结构和接口建议见同目录《我要找人模块需求文档.md》；原型备注用于页面内快速对齐，二者字段命名保持一致。</li>
-            </ul>
-          </section>
-        </div>
-      `;
-  panel.innerHTML = `
-        <div class="owo-devreq-head">
-          <div>
             <div class="owo-devreq-title">对话可见 / 不可见 · 需求文档</div>
-            <div class="owo-devreq-sub">产品评审简版 · 更新于 2026-10-26</div>
+            <div class="owo-devreq-sub">产品评审简版 · 更新于 2026-10-28 · 以当前 OUO A/B 原型为准</div>
           </div>
           <button class="owo-devreq-close" type="button" aria-label="关闭">×</button>
         </div>
@@ -75026,12 +74903,14 @@ function mountOwoDevRequirementNotes() {
               <span class="owo-devreq-tag owo-devreq-p0">P0</span>
               <span class="owo-devreq-tag owo-devreq-info">产品规则</span>
             </div>
-            <h3>功能目标</h3>
+            <h3>功能目标与权限</h3>
             <ul>
-              <li>聊天页姓名下方提供“对方真人可见”控制，默认开启。</li>
-              <li>关闭后，仅切换后新发送的内容对对方真人不可见；历史消息的可见性不改变。</li>
-              <li>每次切换都在消息流中插入分界提示，清楚说明后续内容是“真人可见”或“真人不可见”。</li>
-              <li>私密内容仅用于保持当前对话连贯，默认不进入长期记忆、真人通知摘要或公开报告；安全、举报和法律场景按平台规则处理。</li>
+              <li>普通聊天为默认状态；用户点击姓名后方的 OUO / 隐身图标进入独立的隐身聊天空间，不离开当前聊天对象。</li>
+              <li>隐身聊天中只允许与对方分身交互，隐藏“找真人 / 找分身”切换；进入后由对方分身主动发送一条欢迎消息。</li>
+              <li>隐身消息统一标记 <code>humanVisible=false</code>；普通消息为 <code>humanVisible=true</code>。两类消息在前端分流展示，清空隐身记录不得影响普通聊天记录。</li>
+              <li>每个聊天对象独立保存隐身状态、评审方案和精灵拖拽位置；切换对象、刷新页面后恢复对应会话状态。</li>
+              <li>原型中的视觉状态不等同于真实权限控制。正式开发必须由服务端校验可见范围，并从对方真人会话、真人通知摘要、长期记忆、公开报告及默认训练素材中排除 <code>humanVisible=false</code> 内容。</li>
+              <li>安全、举报和法律合规场景按平台规则处理，不对用户承诺“平台绝对不可见”。</li>
             </ul>
           </section>
 
@@ -75039,12 +74918,30 @@ function mountOwoDevRequirementNotes() {
             <div class="owo-devreq-tagrow">
               <span class="owo-devreq-tag owo-devreq-info">交互与视觉</span>
             </div>
-            <h3>界面要求</h3>
+            <h3>A / B 方案与动效</h3>
             <ul>
-              <li>顶部提供 A“开关”和 B“双选”两种评审方案；两者仅改变控件形式，不改变权限逻辑。</li>
-              <li>首次关闭时展示说明弹层：标题无锁图标；主按钮使用品牌紫；“暂不切换”使用紫色描边。</li>
-              <li>真人不可见段落使用薄荷青色系，并保持左右气泡的深浅区分；发送按钮继续使用品牌紫。</li>
-              <li>私密状态下禁用“找真人”，只能与分身继续对话；恢复真人可见后重新开放。</li>
+              <li>页面左上保留 A / B 评审切换，不再显示旧版“隐私 UI / A 开关 / B 双选”外部工具栏。切换方案不改变消息权限数据。</li>
+              <li><strong>A 方案：</strong>使用用户提供的原始 OUO 图片，位于姓名后方，可拖拽；浅色与暗黑模式必须使用完全相同的图片、颜色和比例，不重画、不裁切变形、不加滤镜或眼睛轮廓。支持轻微漂浮、独立眨眼、点击弹起、光环与星光反馈。</li>
+              <li><strong>B 方案：</strong>使用用户提供的兜帽幽灵图标，位置和拖拽规则与 A 一致；进入后切换为暗黑幽灵主题，背景、左右气泡、输入框及发送按钮同步变化，右上星光使用明亮年轻的荧光色。</li>
+              <li>普通状态触碰精灵提示“隐身聊天”；隐身状态提示“解除隐身”。点击进入时精灵弹起并显示轻提示，动效约 400-650ms，不阻塞输入和滚动。</li>
+              <li>隐身页面顶部提示“正与{姓名} 的分身私聊，对方真人看不到哦～”；A 方案暗黑模式下提示条采用深紫底和浅紫文字，但不得改变 OUO 图片本身。</li>
+              <li>再次点击精灵退出隐身空间，恢复普通聊天；从隐身页点击返回键也返回当前对象的普通聊天，而不是退出整个聊天页。</li>
+              <li>进入隐身聊天后，顶部右侧显示“…”菜单；菜单提供“清空聊天记录”，确认按钮使用品牌紫。确认后仅删除当前对象的 <code>humanVisible=false</code> 消息并提示“隐身聊天记录已清空”。</li>
+              <li>动效使用 CSS <code>transform/opacity/keyframes</code>，兼容 <code>prefers-reduced-motion</code>；页面进入后台时暂停循环动效。</li>
+            </ul>
+          </section>
+
+          <section class="owo-devreq-section">
+            <div class="owo-devreq-tagrow">
+              <span class="owo-devreq-tag owo-devreq-p0">P0</span>
+              <span class="owo-devreq-tag owo-devreq-info">状态与异常</span>
+            </div>
+            <h3>状态保存与失败处理</h3>
+            <ul>
+              <li>开启、关闭和清空操作成功后才能更新最终状态；接口失败时保留原状态，并展示明确错误提示。</li>
+              <li>进入隐身不等于删除、撤回或迁移历史消息；退出隐身后普通聊天历史完整保留。</li>
+              <li>拖拽精灵时不得触发模式切换；点击与拖拽通过移动距离阈值区分，精灵不得遮挡返回键、姓名、右侧菜单、消息输入和底部安全区。</li>
+              <li>右侧“…”只在隐身聊天状态显示，层级高于标题区且不被 A/B 评审控件遮挡；关闭菜单、退出隐身或清空完成后菜单状态复位。</li>
             </ul>
           </section>
 
@@ -75070,19 +74967,34 @@ function mountOwoDevRequirementNotes() {
             </div>
             <h3>核心验收</h3>
             <ul>
-              <li><strong>TC01 默认状态：</strong>首次进入普通聊天页，显示“对方真人可见”，状态为开启，消息使用原有可见气泡。</li>
-              <li><strong>TC02 首次关闭：</strong>点击关闭后出现说明弹层；标题无图标，主按钮为品牌紫，次按钮有紫色描边。</li>
-              <li><strong>TC03 暂不切换：</strong>点击“暂不切换”关闭弹层，开关仍为开启，不插入分界线。</li>
-              <li><strong>TC04 开启私密：</strong>确认后开关变为关闭，消息流插入“对方真人不可见”分界，输入区提示改为“私密发送…”。</li>
-              <li><strong>TC05 私密消息：</strong>切换后双方新消息均标记 <code>humanVisible=false</code>，左右气泡颜色可明确区分。</li>
-              <li><strong>TC06 历史不追溯：</strong>切换前的可见消息保持原样，不因开启私密而改变颜色或权限。</li>
-              <li><strong>TC07 恢复可见：</strong>重新开启后插入“真人可见”分界；后续消息恢复原气泡，并标记 <code>humanVisible=true</code>。</li>
-              <li><strong>TC08 回复对象：</strong>私密状态无法选择“找真人”；恢复可见后可正常选择。</li>
-              <li><strong>TC09 刷新保留：</strong>刷新页面后，当前顶部 UI 方案和最近选择的可见状态按产品设定正确恢复。</li>
-              <li><strong>TC10 数据隔离：</strong>真人会话、通知摘要、长期记忆和公开报告中不得出现 <code>humanVisible=false</code> 内容。</li>
-              <li><strong>TC11 时间边界：</strong>分别验证今天、昨天、2天、7天、8天及跨月跨年时间，聊天与会话列表格式符合对应规则。</li>
-              <li><strong>TC12 本地设置：</strong>切换设备时区及12/24小时制后重新进入页面，日期归属和时分格式跟随设备变化。</li>
-              <li><strong>TC13 完整时间：</strong>点击任一聊天时间条显示完整格式，再次点击恢复简洁格式；不影响消息排序与滚动位置。</li>
+              <li><strong>TC01 普通状态：</strong>A/B 两方案均显示在姓名区域，精灵不变形；触碰提示“隐身聊天”，普通消息与原聊天功能正常。</li>
+              <li><strong>TC02 A 方案素材：</strong>浅色与暗黑模式使用同一 OUO 原图，无重画、滤镜、额外眼睛轮廓和比例变化；眨眼与漂浮正常。</li>
+              <li><strong>TC03 B 方案素材：</strong>兜帽幽灵保持原比例，眨眼正常，星光清晰；不显示多余外框。</li>
+              <li><strong>TC04 点击进入：</strong>点击精灵出现弹起、光环和星光反馈，随后进入隐身聊天；对方分身主动打招呼。</li>
+              <li><strong>TC05 隐身页面：</strong>顶部提示文案正确；隐藏“找真人 / 找分身”；输入、发送、滚动和底部安全区不受动效影响。</li>
+              <li><strong>TC06 主题切换：</strong>A 暗黑模式仅调整页面和提示条，不改变 OUO；B 进入后背景、左右气泡、输入框和发送按钮均切换为暗黑幽灵主题。</li>
+              <li><strong>TC07 私密消息：</strong>隐身状态双方新消息均标记 <code>humanVisible=false</code>，左右气泡可区分；普通历史不被追溯修改。</li>
+              <li><strong>TC08 退出隐身：</strong>触碰提示变为“解除隐身”；点击精灵或返回键后回到当前对象普通聊天，普通功能恢复。</li>
+              <li><strong>TC09 拖拽：</strong>精灵可移动并保存位置；拖拽不触发进入/退出，刷新后位置恢复且不遮挡关键控件。</li>
+              <li><strong>TC10 更多菜单：</strong>“…”仅在隐身页右上显示且可点击；A/B 方案选择不遮挡菜单。</li>
+              <li><strong>TC11 清空记录：</strong>弹窗文案正确，确认按钮为品牌紫；确认后仅清空当前对象隐身消息，普通消息保留。</li>
+              <li><strong>TC12 会话隔离：</strong>不同聊天对象的隐身状态、方案、位置和消息互不串联；刷新后恢复正确。</li>
+              <li><strong>TC13 失败回滚：</strong>模拟开启、关闭、保存和清空失败，原状态不变化并显示错误提示。</li>
+              <li><strong>TC14 数据隔离：</strong>对方真人会话、通知摘要、长期记忆、公开报告和默认训练素材中不得出现 <code>humanVisible=false</code> 内容。</li>
+              <li><strong>TC15 减少动态：</strong>系统开启“减少动态效果”或页面进入后台时，循环动画停止或降级，核心切换功能仍可用。</li>
+              <li><strong>TC16 时间边界：</strong>验证今天、昨天、2天、7天、8天及跨月跨年时间；12/24小时制和点击完整时间符合 IM 时间规范。</li>
+            </ul>
+          </section>
+
+          <section class="owo-devreq-section">
+            <div class="owo-devreq-tagrow">
+              <span class="owo-devreq-tag owo-devreq-info">GitHub Pages</span>
+            </div>
+            <h3>静态发布检查</h3>
+            <ul>
+              <li>GitHub Pages 默认入口必须为根目录 <code>index.html</code>，并与当前评审原型保持同步。</li>
+              <li>必须连同 <code>assets/</code> 目录一起上传；OUO A、OUO B 和人生图书馆背景均使用相对路径，不能只上传单个 HTML。</li>
+              <li>文件名大小写必须与引用完全一致。外部演示视频依赖网络，加载失败时不应影响聊天、隐身功能和本地图片展示。</li>
             </ul>
           </section>
         </div>
